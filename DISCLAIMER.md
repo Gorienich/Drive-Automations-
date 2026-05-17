@@ -11,5 +11,3 @@ Users are responsible for:
 - securing their own credentials
 - complying with API terms of service
 - validating scripts before production use
-
-- If you use this project, a star ⭐ is appreciated.
