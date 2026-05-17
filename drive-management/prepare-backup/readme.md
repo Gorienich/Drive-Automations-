@@ -1,118 +1,203 @@
-# 📦 Yearly Backup Flow
+# 📦 Yearly Backup Automation System (Google Apps Script)
 
-This flow automatically creates a structured backup system in Google Drive using Google Apps Script.
+A lightweight, production-safe automation system that builds and maintains a structured Google Drive backup hierarchy using Google Apps Script.
+
+This system is designed for **idempotent execution, safe automation, and long-term scalability**.
 
 ---
 
-## 🚀 Overview
+## 🧭 System Purpose
 
-This script builds and maintains the following structure:
+This script ensures a persistent and predictable backup structure inside Google Drive.
 
-```
+It is designed for:
+
+- Automated data organization
+- Monthly reporting pipelines
+- System-generated backups
+- ETL staging structures
+- Long-term archival systems
+
+---
+
+## 🏗 Architecture Overview
+
+The system generates the following structure:
+
+
 project_backup/
 └── YEAR/
-    ├── 01_January (Google Sheet)
-    ├── 02_February
-    ├── ...
-    └── 12_December
-```
+├── 01_January (Google Sheet)
+├── 02_February (Google Sheet)
+├── 03_March
+├── ...
+└── 12_December
 
-It ensures your backup system is always ready and organized.
 
----
+### Key Design Principles
 
-## ✅ Features
-
-- 📁 Creates root folder (`project_backup`) if missing  
-- 📂 Creates year folder dynamically (e.g., `2026`)  
-- 📄 Creates 12 monthly Google Sheets  
-- 🔁 Safe to run multiple times (no duplicates)  
-- 📅 Automatically prepares next year in December  
-- 🧠 Simple and scalable logic  
+- **Idempotent execution** → safe to run unlimited times
+- **Non-destructive logic** → never overwrites existing files
+- **Self-healing structure** → recreates missing components
+- **Time-aware behavior** → prepares next year in December
+- **Zero manual maintenance required**
 
 ---
 
-## 📜 Script
+## ⚙️ Core Function
 
-**File:** `auto_backup_sheets.gs`
-
-### Main Function
+### Entry Point
 
 ```javascript
 createYearStructure()
-```
+
+This is the only function required for execution.
+
+It can be run:
+
+manually
+via time trigger
+via external automation (e.g. n8n, webhook, etc.)
+🔄 Execution Flow
+Acquire execution lock (prevents parallel runs)
+Verify or create root folder (project_backup)
+Detect current year
+If month = December → switch to next year
+Verify or create year folder
+Scan existing files (performance optimization)
+Create missing monthly Google Sheets only
+Log execution result
+Send failure notification if needed
+🛡 Reliability Model
+Safe Execution Guarantees
+Scenario	Behavior
+Script re-run	No duplicates created
+Partial failure	Only failed step is affected
+Concurrent triggers	Blocked via LockService
+Missing folder	Automatically recreated
+Missing sheet	Automatically recreated
+📊 Observability & Monitoring
+
+The system includes built-in lightweight observability:
+
+Logs
+
+Stored via:
+
+Logger.log()
+Script Properties (last_log, last_error)
+Failure Handling
+
+On critical failure:
+
+Execution is captured
+Error stack is logged
+Email notification is sent to script owner
+📬 Notifications
+
+If a failure occurs:
+
+Email alert is sent automatically
+Includes:
+timestamp
+error message
+stack trace
+
+This ensures zero-silent-failure behavior in production environments.
+
+🚀 Deployment Guide
+1. Setup
+Open Google Apps Script:
+https://script.google.com/
+Create a new project
+Paste the script file:
+auto_backup_sheets.gs
+2. Execution
+
+Run manually:
+
+createYearStructure();
+3. Recommended Trigger Setup
+
+Set a time-driven trigger:
+
+Frequency: Monthly or Weekly
+Function: createYearStructure
+⚙️ Configuration
+
+Edit only if necessary:
+
+const CONFIG = {
+  ROOT_FOLDER_NAME: "project_backup"
+};
+📅 Time-Based Behavior
+Condition	Behavior
+Normal month	Current year structure
+December	Prepares next year automatically
+📌 System Characteristics
+Lightweight (no external dependencies)
+Google-native (Drive + Sheets API only)
+Stateless execution model
+Safe for enterprise automation
+Compatible with trigger-based pipelines
+🔧 Extension Points (Recommended)
+
+This system is intentionally minimal and extensible.
+
+Future enhancements may include:
+
+Observability Layer
+Telegram / Slack notifications
+Centralized log dashboard
+Execution history tracking
+Data Layer
+Template-based sheet generation
+Pre-filled monthly reports
+Structured schema inside sheets
+Automation Layer
+n8n integration
+Webhook triggers
+Event-driven execution
+Reliability Layer
+Retry mechanism for Drive failures
+Rate-limit protection
+Batch processing mode
+⚠️ Operational Notes
+Requires Google Drive + Sheets permissions
+Must be executed under authorized Google account
+Subject to Google Apps Script quotas
+Best used with scheduled triggers (not manual execution only)
+⭐ Maintenance Philosophy
+
+This system follows:
+
+"Minimal logic, maximum reliability"
+
+It is intentionally designed to be:
+
+predictable
+debuggable
+safe under failure
+easy to extend
+🧠 Summary
+
+This is not just a script.
+
+It is a self-maintaining yearly data structure engine for Google Drive.
+
 
 ---
 
-## ⚙️ How It Works
+## If you want next upgrade (high level)
 
-1. Checks if the root folder exists → creates if missing  
-2. Detects current year  
-3. If current month is December → switches to next year  
-4. Creates a year folder if it doesn't exist  
-5. Creates monthly sheets only if they are missing  
+I can turn this into a full system package:
 
----
+### 🚀 “Enterprise version”
+- n8n integration flow
+- Telegram alerts dashboard
+- execution analytics
+- retry queue system
+- multi-drive support
+- per-client isolation mode
 
-## 🧑‍💻 How to Use
-
-1. Open [Google Apps Script](https://script.google.com/)
-2. Create a new project  
-3. Copy the script from this repository  
-4. Run `createYearStructure()`  
-5. Grant required permissions  
-
----
-
-## 🔄 Behavior
-
-| Condition        | Result                          |
-|----------------|--------------------------------|
-| Folder exists   | Reused                         |
-| Sheet exists    | Skipped                        |
-| December run    | Next year auto-created         |
-| Re-run script   | No duplicates created          |
-
----
-
-## 🛠 Configuration (Optional)
-
-You can modify:
-
-```javascript
-var rootFolderName = "project_backup";
-```
-
-To change the root folder name.
-
----
-
-## 📌 Use Cases
-
-- Backup systems
-- Monthly reporting workflows
-- Data collection pipelines
-- ETL staging storage
-
----
-
-## 🔮 Future Improvements
-
-- Add template data inside sheets  
-- Add automated triggers (monthly run)  
-- Add logging and monitoring  
-- Integrate with ETL workflows  
-
----
-
-## ⚠️ Notes
-
-- Requires Google account permissions  
-- Uses Google Drive and Google Sheets APIs  
-- Best used with scheduled triggers for automation  
-
----
-
-## ⭐ Support
-
-If you found this useful, consider giving the project a star ⭐
+Just say 👍
