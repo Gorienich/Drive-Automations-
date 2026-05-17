@@ -1,0 +1,595 @@
+// ============================================================
+// INSTALLATIONS AUTOMATION — Google Apps Script
+// ============================================================
+// Author: Auto-generated for Installations Monitoring Workflow
+// Timezone: Asia/Jerusalem (UTC+3)
+//
+// WHAT THIS SCRIPT DOES:
+//   ✅ Every day at 21:00 Israel time:
+//      - Archives today's completed rows → correct monthly sheet
+//      - Clears workspace, leaves 10 fresh "ready" rows
+//      - Creates next month's sheet automatically if needed
+//   ✅ Every Friday at 21:00: sends weekly stats report by email
+//   ✅ Every 1st of month at 21:00: sends monthly stats report by email
+//   ✅ December 31st: creates the next year's full folder (all 12 months)
+//
+// HOW TO USE:
+//   1. Open your Workspace Google Sheet → Extensions → Apps Script
+//   2. Paste this entire file
+//   3. Fill in CONFIG section below (IDs)
+//   4. Run setupTriggers() ONCE
+//   Done — it runs automatically from then on.
+// ============================================================
+
+
+// ============================================================
+// ⚙️  CONFIGURATION — FILL THESE IN BEFORE RUNNING
+// ============================================================
+const CONFIG = {
+
+  // The Spreadsheet ID of your "Insulation_s work space" Google Sheet
+  // Find it in the URL: docs.google.com/spreadsheets/d/  <<THIS PART>>  /edit
+  WORKSPACE_SPREADSHEET_ID: '<<THIS PART>> ',
+
+  // The exact name of the sheet tab inside the workspace file your work day
+  WORKSPACE_SHEET_NAME: 'Insulations work space',
+
+  // Google Drive Folder ID of the "instulations" root folder
+  // Open the folder in Drive → look at the URL: drive.google.com/drive/folders/ <<THIS PART>>
+  ROOT_FOLDER_ID: ' <<THIS PART>>',
+
+  // Email address to receive  reports
+  REPORT_EMAIL: 'example@gmail.com',
+
+  // How many ready/template rows to keep in workspace after cleanup
+  READY_ROWS_COUNT: 10,
+
+  // ---- Placeholder text (must match exactly what's in your sheet) ----
+  STATUS_PLACEHOLDER: 'בחר סטאטוס',
+  TIME_PLACEHOLDER:   'בחר זמן',
+  NAME_PLACEHOLDER:   'בחר שם',
+
+  // ---- Column positions and work day data titles (0 = column A, 1 = column B, etc.) ----
+  COL_DATE:   0,   // A: תאריך
+  COL_DAY:    1,   // B: יום
+  COL_ID:     2,   // C: ID
+  COL_STATUS: 3,   // D: סטאטוס
+  COL_TIME:   4,   // E: זמן
+  COL_NAME:   5,   // F: שם
+  COL_MID:    6,   // G: MID
+
+  // Hebrew day names (Sunday = index 0)
+  HEBREW_DAYS: ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'],
+
+  // Hebrew month names for reports ( you can use your lang)
+  HEBREW_MONTHS: [
+    'ינואר','פברואר','מרץ','אפריל','מאי','יוני',
+    'יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'
+  ],
+};
+// ============================================================
+
+
+// ============================================================
+// 🔧 SETUP — Run this ONCE after pasting the script
+// ============================================================
+function setupTriggers() {
+  // Remove any old triggers first (avoid duplicates)
+  ScriptApp.getProjectTriggers().forEach(t => ScriptApp.deleteTrigger(t));
+
+  // Daily trigger at 21:00 (uses the spreadsheet's timezone — set it to your UTC Asia/Jerusalem)
+  ScriptApp.newTrigger('dailyEndOfDay')
+    .timeBased()
+    .atHour(21)
+    .everyDays(1)
+    .create();
+
+  Logger.log('✅ Trigger set up! dailyEndOfDay will run every day at 21:00.');
+  Logger.log('Make sure your spreadsheet timezone is set to your UTC.');
+}
+
+// ============================================================
+// 🌙 MAIN DAILY FUNCTION — runs automatically at 21:00
+// ============================================================
+function dailyEndOfDay() {
+  const now = new Date();
+  Logger.log(`\n========== dailyEndOfDay started: ${now} ==========`);
+
+  try {
+    // STEP 1: Archive today's (and any past) rows to monthly sheets
+    const archivedCount = archivePastRows();
+    Logger.log(`✅ Step 1: Archived ${archivedCount} rows to monthly sheets`);
+
+    // STEP 2: Reset workspace — remove old rows, keep 10 fresh template rows
+    resetWorkspaceTo10Rows();
+    Logger.log('✅ Step 2: Workspace reset to 10 ready rows');
+
+    // STEP 3: Make sure this month + next month sheets exist
+    ensureMonthlyFilesExist(now);
+    Logger.log('✅ Step 3: Monthly files checked/created');
+
+    // STEP 4: Friday → weekly report
+    if (now.getDay() === 5) {
+      sendWeeklyReport(now);
+      Logger.log('✅ Step 4: Weekly Friday report sent');
+    }
+
+    // STEP 5: 1st of month → monthly report (for the previous month)
+    if (now.getDate() === 1) {
+      const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      sendMonthlyReport(lastMonth);
+      Logger.log('✅ Step 5: Monthly report sent');
+    }
+
+    // STEP 6: Dec 31 → create next year folder with all 12 months
+    if (now.getMonth() === 11 && now.getDate() === 31) {
+      prepareNextYearFolder(now.getFullYear() + 1);
+      Logger.log('✅ Step 6: Next year folder created');
+    }
+
+    Logger.log('========== dailyEndOfDay completed successfully ==========\n');
+
+  } catch (err) {
+    const msg = `שגיאה בהפעלה האוטומטית (${formatDate(now)}):\n\n${err.message}\n\n${err.stack}`;
+    Logger.log('❌ ERROR: ' + msg);
+    MailApp.sendEmail(CONFIG.REPORT_EMAIL, '⚠️ שגיאה - מערכת ניהול התקנות', msg);
+  }
+}
+
+
+// ============================================================
+// 📦 ARCHIVE: Move past/today rows → correct monthly sheet
+// ============================================================
+function archivePastRows() {
+  const ss    = SpreadsheetApp.openById(CONFIG.WORKSPACE_SPREADSHEET_ID);
+  const ws    = ss.getSheetByName(CONFIG.WORKSPACE_SHEET_NAME);
+  const data  = ws.getDataRange().getValues();
+
+  const today = dayStart(new Date());
+
+  // Collect rows to archive, grouped by month
+  const byMonth = {};          // key: "YYYY_MM"
+  const rowsToDelete = [];     // 1-indexed row numbers (delete from bottom up)
+
+  for (let i = 1; i < data.length; i++) {          // skip header row
+    const row    = data[i];
+    const dateVal = row[CONFIG.COL_DATE];
+    const status  = row[CONFIG.COL_STATUS];
+
+    // Skip empty rows and template rows
+    if (!dateVal || isTemplateRow(row)) continue;
+
+    const rowDate = dayStart(new Date(dateVal));
+    if (isNaN(rowDate)) continue;
+
+    // Archive rows whose date is today or in the past
+    if (rowDate <= today) {
+      const key = `${rowDate.getFullYear()}_${rowDate.getMonth() + 1}`;
+      if (!byMonth[key]) byMonth[key] = [];
+      byMonth[key].push(row);
+      rowsToDelete.push(i + 1); // +1 because sheet rows are 1-indexed
+    }
+  }
+
+  // Write to monthly sheets
+  let totalArchived = 0;
+  for (const key of Object.keys(byMonth)) {
+    const [year, month] = key.split('_').map(Number);
+    appendRowsToMonthlySheet(year, month, byMonth[key]);
+    totalArchived += byMonth[key].length;
+  }
+
+  // Delete from workspace — BOTTOM UP to keep row numbers valid
+  rowsToDelete.sort((a, b) => b - a).forEach(rowNum => {
+    ws.deleteRow(rowNum);
+  });
+
+  return totalArchived;
+}
+
+function isTemplateRow(row) {
+  const status = row[CONFIG.COL_STATUS];
+  const date   = row[CONFIG.COL_DATE];
+  return !date || status === CONFIG.STATUS_PLACEHOLDER || !status;
+}
+
+
+// ============================================================
+// 📋 MONTHLY SHEET: Append rows to the correct monthly file
+// ============================================================
+function appendRowsToMonthlySheet(year, month, rows) {
+  const sheet = getOrCreateMonthlySheet(year, month);
+
+  rows.forEach(row => {
+    sheet.appendRow([
+      row[CONFIG.COL_DATE],
+      row[CONFIG.COL_DAY],
+      row[CONFIG.COL_ID],
+      row[CONFIG.COL_STATUS],
+      row[CONFIG.COL_TIME],
+      row[CONFIG.COL_NAME],
+    ]);
+  });
+
+  Logger.log(`  → Appended ${rows.length} rows to ${month}/${year} monthly sheet`);
+}
+
+function getOrCreateMonthlySheet(year, month) {
+  const monthStr  = String(month).padStart(2, '0');
+  const fileName  = `${monthStr}_${year}`;
+  const sheetName = `${monthStr}${year}`;
+
+  const yearFolder = getOrCreateYearFolder(year);
+
+  // Try to find existing file
+  const existingFiles = yearFolder.getFilesByName(fileName);
+  let ss;
+  if (existingFiles.hasNext()) {
+    ss = SpreadsheetApp.open(existingFiles.next());
+  } else {
+    // Create brand-new spreadsheet for this month
+    ss = SpreadsheetApp.create(fileName);
+    DriveApp.getFileById(ss.getId()).moveTo(yearFolder);
+
+    const sheet = ss.getActiveSheet();
+    sheet.setName(sheetName);
+    sheet.setRightToLeft(true);
+
+    // Header row
+    sheet.appendRow(['תאריך', 'יום', 'ID', 'סטאטוס', 'זמן', 'שם']);
+    sheet.setFrozenRows(1);
+
+    // Format date column
+    const dateFormat = sheet.getRange('A:A');
+    dateFormat.setNumberFormat('dd/mm/yyyy');
+
+    Logger.log(`  → Created new monthly sheet: ${fileName}`);
+  }
+
+  return ss.getSheetByName(sheetName) || ss.getSheets()[0];
+}
+
+function getOrCreateYearFolder(year) {
+  const root    = DriveApp.getFolderById(CONFIG.ROOT_FOLDER_ID);
+  const folders = root.getFoldersByName(String(year));
+  return folders.hasNext() ? folders.next() : root.createFolder(String(year));
+}
+
+function ensureMonthlyFilesExist(date) {
+  // Ensure current month and next month always exist
+  const year  = date.getFullYear();
+  const month = date.getMonth() + 1;
+  getOrCreateMonthlySheet(year, month);
+  const nextMonth = month === 12 ? 1 : month + 1;
+  const nextYear  = month === 12 ? year + 1 : year;
+  getOrCreateMonthlySheet(nextYear, nextMonth);
+}
+
+
+// ============================================================
+// 🧹 WORKSPACE RESET: Delete old rows, add 10 fresh template rows
+// ============================================================
+function resetWorkspaceTo10Rows() {
+  const ss   = SpreadsheetApp.openById(CONFIG.WORKSPACE_SPREADSHEET_ID);
+  const ws   = ss.getSheetByName(CONFIG.WORKSPACE_SHEET_NAME);
+  const data = ws.getDataRange().getValues();
+
+  const tomorrow = dayStart(new Date());
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
+  // Count real future rows (not templates) that remain
+  let futureRowCount = 0;
+  const templateRowIndices = [];
+
+  for (let i = 1; i < data.length; i++) {
+    const row    = data[i];
+    const dateVal = row[CONFIG.COL_DATE];
+    const status  = row[CONFIG.COL_STATUS];
+
+    if (!dateVal) {
+      templateRowIndices.push(i + 1);
+      continue;
+    }
+
+    const rowDate = dayStart(new Date(dateVal));
+    if (isNaN(rowDate)) {
+      templateRowIndices.push(i + 1);
+      continue;
+    }
+
+    if (isTemplateRow(row) || rowDate < tomorrow) {
+      templateRowIndices.push(i + 1);
+    } else {
+      futureRowCount++;
+    }
+  }
+
+  // Remove all template/past rows from bottom up
+  templateRowIndices.sort((a, b) => b - a).forEach(rowNum => {
+    ws.deleteRow(rowNum);
+  });
+
+  // How many fresh template rows do we need to add?
+  const rowsToAdd = Math.max(0, CONFIG.READY_ROWS_COUNT - futureRowCount);
+
+  // Add template rows for tomorrow (or next workday)
+  const nextWorkDay = getNextWorkday(new Date());
+
+  for (let i = 0; i < rowsToAdd; i++) {
+    const dayIndex   = nextWorkDay.getDay();
+    const hebrewDay  = CONFIG.HEBREW_DAYS[dayIndex];
+
+    ws.appendRow([
+      nextWorkDay,
+      hebrewDay,
+      '',                          // ID — to be filled in
+      CONFIG.STATUS_PLACEHOLDER,
+      CONFIG.TIME_PLACEHOLDER,
+      CONFIG.NAME_PLACEHOLDER,
+    ]);
+  }
+
+  Logger.log(`  → Kept ${futureRowCount} future rows, added ${rowsToAdd} template rows`);
+}
+
+function getNextWorkday(fromDate) {
+  const d = new Date(fromDate);
+  d.setDate(d.getDate() + 1);
+  d.setHours(0, 0, 0, 0);
+  // Skip Saturday (6) — Shabbat
+  while (d.getDay() === 6) {
+    d.setDate(d.getDate() + 1);
+  }
+  return d;
+}
+
+
+// ============================================================
+// 📊 REPORTS: Collect stats and send by email
+// ============================================================
+
+function sendWeeklyReport(now) {
+  const endDate   = new Date(now);
+  const startDate = new Date(now);
+  startDate.setDate(now.getDate() - 6);
+
+  const stats   = collectStats(startDate, endDate);
+  const subject = `📊 דוח שבועי התקנות — ${formatDate(startDate)} עד ${formatDate(endDate)}`;
+  sendStatsEmail(subject, stats, 'שבועי', startDate, endDate);
+}
+
+function sendMonthlyReport(monthDate) {
+  const year      = monthDate.getFullYear();
+  const month     = monthDate.getMonth();   // 0-indexed
+  const startDate = new Date(year, month, 1);
+  const endDate   = new Date(year, month + 1, 0); // last day of month
+
+  const stats   = collectStats(startDate, endDate);
+  const subject = `📊 דוח חודשי התקנות — ${CONFIG.HEBREW_MONTHS[month]} ${year}`;
+  sendStatsEmail(subject, stats, `${CONFIG.HEBREW_MONTHS[month]} ${year}`, startDate, endDate);
+}
+
+function collectStats(startDate, endDate) {
+  const stats = { total: 0, byStatus: {}, byManager: {}, byDay: {} };
+
+  // Read from workspace (future rows that haven't been archived yet)
+  const ss   = SpreadsheetApp.openById(CONFIG.WORKSPACE_SPREADSHEET_ID);
+  const ws   = ss.getSheetByName(CONFIG.WORKSPACE_SHEET_NAME);
+  processSheetForStats(ws, startDate, endDate, stats);
+
+  // Read from monthly archive sheets
+  const yearsNeeded = new Set();
+  let d = new Date(startDate);
+  while (d <= endDate) {
+    yearsNeeded.add(d.getFullYear());
+    d.setMonth(d.getMonth() + 1);
+  }
+
+  yearsNeeded.forEach(year => {
+    try {
+      const yearFolder = getOrCreateYearFolder(year);
+      const files = yearFolder.getFiles();
+      while (files.hasNext()) {
+        try {
+          const monthSS    = SpreadsheetApp.open(files.next());
+          const monthSheet = monthSS.getSheets()[0];
+          processSheetForStats(monthSheet, startDate, endDate, stats);
+        } catch (e) {
+          Logger.log(`  Skipping file in stats: ${e.message}`);
+        }
+      }
+    } catch (e) {
+      Logger.log(`  Error reading year folder ${year}: ${e.message}`);
+    }
+  });
+
+  return stats;
+}
+
+function processSheetForStats(sheet, startDate, endDate, stats) {
+  const data  = sheet.getDataRange().getValues();
+  const start = dayStart(new Date(startDate));
+  const end   = dayEnd(new Date(endDate));
+
+  data.slice(1).forEach(row => {
+    const dateVal = row[CONFIG.COL_DATE];
+    const status  = row[CONFIG.COL_STATUS];
+    const manager = row[CONFIG.COL_NAME];
+
+    if (!dateVal || isTemplateRow(row)) return;
+
+    const rowDate = new Date(dateVal);
+    if (isNaN(rowDate) || rowDate < start || rowDate > end) return;
+
+    stats.total++;
+
+    const statusKey  = status  || 'לא ידוע';
+    const managerKey = manager || 'לא ידוע';
+    const dayName    = CONFIG.HEBREW_DAYS[rowDate.getDay()];
+
+    stats.byStatus[statusKey]   = (stats.byStatus[statusKey]   || 0) + 1;
+    stats.byManager[managerKey] = (stats.byManager[managerKey] || 0) + 1;
+    stats.byDay[dayName]        = (stats.byDay[dayName]        || 0) + 1;
+  });
+}
+
+function sendStatsEmail(subject, stats, periodLabel, startDate, endDate) {
+  const html = buildReportHtml(stats, periodLabel, startDate, endDate);
+  MailApp.sendEmail({
+    to:       CONFIG.REPORT_EMAIL,
+    subject:  subject,
+    htmlBody: html,
+  });
+  Logger.log(`  → Report sent to ${CONFIG.REPORT_EMAIL}`);
+}
+
+
+// ============================================================
+// 📧 HTML EMAIL TEMPLATE (RTL, Hebrew, styled)
+// ============================================================
+function buildReportHtml(stats, periodLabel, startDate, endDate) {
+
+  function tableRows(obj, showPct) {
+    return Object.entries(obj)
+      .sort((a, b) => b[1] - a[1])
+      .map(([key, count]) => {
+        const pct = stats.total > 0 ? Math.round(count / stats.total * 100) : 0;
+        const pctCell = showPct ? `<td style="${TD}">${pct}%</td>` : '';
+        return `<tr><td style="${TD}">${key}</td><td style="${TD};text-align:center">${count}</td>${pctCell}</tr>`;
+      }).join('');
+  }
+
+  const TD  = 'padding:9px 12px;border:1px solid #e0e0e0;';
+  const TH  = 'padding:10px 12px;border:1px solid #e0e0e0;background:#f1f3f4;text-align:right;';
+
+  return `
+<!DOCTYPE html>
+<html dir="rtl" lang="he">
+<head><meta charset="UTF-8"></head>
+<body style="font-family:Arial,sans-serif;background:#f5f5f5;margin:0;padding:20px;direction:rtl;">
+  <div style="max-width:620px;margin:0 auto;background:white;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+
+    <!-- Header -->
+    <div style="background:linear-gradient(135deg,#1a73e8,#0d47a1);color:white;padding:28px 24px;">
+      <h1 style="margin:0;font-size:22px;font-weight:700;">📊 דוח ${periodLabel} — ניהול התקנות</h1>
+      <p style="margin:6px 0 0;opacity:0.85;font-size:14px;">${formatDate(startDate)} – ${formatDate(endDate)}</p>
+    </div>
+
+    <!-- Total -->
+    <div style="padding:24px;text-align:center;border-bottom:1px solid #f0f0f0;">
+      <div style="display:inline-block;background:#e8f0fe;border-radius:12px;padding:16px 32px;">
+        <div style="font-size:52px;font-weight:800;color:#1a73e8;line-height:1;">${stats.total}</div>
+        <div style="color:#555;font-size:15px;margin-top:4px;">סה"כ התקנות בתקופה</div>
+      </div>
+    </div>
+
+    <div style="padding:20px 24px;">
+
+      <!-- By Status -->
+      <h2 style="color:#1a73e8;font-size:16px;border-right:4px solid #1a73e8;padding-right:10px;margin:0 0 12px;">לפי סטאטוס</h2>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:24px;font-size:14px;">
+        <tr><th style="${TH}">סטאטוס</th><th style="${TH};text-align:center">כמות</th><th style="${TH};text-align:center">אחוז</th></tr>
+        ${tableRows(stats.byStatus, true)}
+      </table>
+
+      <!-- By Manager -->
+      <h2 style="color:#1a73e8;font-size:16px;border-right:4px solid #1a73e8;padding-right:10px;margin:0 0 12px;">לפי מנהל</h2>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:24px;font-size:14px;">
+        <tr><th style="${TH}">שם מנהל</th><th style="${TH};text-align:center">כמות</th></tr>
+        ${tableRows(stats.byManager, false)}
+      </table>
+
+      <!-- By Day -->
+      <h2 style="color:#1a73e8;font-size:16px;border-right:4px solid #1a73e8;padding-right:10px;margin:0 0 12px;">לפי יום</h2>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:8px;font-size:14px;">
+        <tr><th style="${TH}">יום</th><th style="${TH};text-align:center">כמות</th></tr>
+        ${tableRows(stats.byDay, false)}
+      </table>
+
+    </div>
+
+    <!-- Footer -->
+    <div style="background:#f8f9fa;padding:14px 24px;text-align:center;color:#999;font-size:12px;border-top:1px solid #eee;">
+      דוח זה נשלח אוטומטית · מערכת ניהול התקנות
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+
+// ============================================================
+// 📅 YEAR-END: Pre-create all 12 monthly sheets for the new year
+// ============================================================
+function prepareNextYearFolder(year) {
+  for (let m = 1; m <= 12; m++) {
+    getOrCreateMonthlySheet(year, m);
+    Utilities.sleep(500); // Avoid quota limits
+  }
+  Logger.log(`✅ Created all 12 monthly sheets for ${year}`);
+
+  MailApp.sendEmail(
+    CONFIG.REPORT_EMAIL,
+    `✅ תיקיית ${year} נוצרה אוטומטית`,
+    `תיקיית שנת ${year} נוצרה עם 12 גיליונות חודשיים מוכנים.\n\nמערכת ניהול התקנות`
+  );
+}
+
+
+// ============================================================
+// 🛠️  UTILITY FUNCTIONS
+// ============================================================
+function dayStart(date) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function dayEnd(date) {
+  const d = new Date(date);
+  d.setHours(23, 59, 59, 999);
+  return d;
+}
+
+function formatDate(date) {
+  if (!date) return '';
+  const d = date instanceof Date ? date : new Date(date);
+  return [
+    String(d.getDate()).padStart(2, '0'),
+    String(d.getMonth() + 1).padStart(2, '0'),
+    d.getFullYear(),
+  ].join('/');
+}
+
+
+// ============================================================
+// ▶️  MANUAL TEST FUNCTIONS (run from Apps Script editor)
+// ============================================================
+
+/** Test the full daily flow right now (without waiting for 21:00) */
+function manualRunNow() {
+  dailyEndOfDay();
+}
+
+/** Test just archiving, without resetting */
+function manualArchiveOnly() {
+  const count = archivePastRows();
+  Logger.log(`Archived ${count} rows`);
+}
+
+/** Test the weekly report email */
+function manualSendWeeklyReport() {
+  sendWeeklyReport(new Date());
+}
+
+/** Test the monthly report email */
+function manualSendMonthlyReport() {
+  sendMonthlyReport(new Date());
+}
+
+/** Pre-create all months for a specific year */
+function manualCreateAllMonthsForYear() {
+  const year = new Date().getFullYear();
+  prepareNextYearFolder(year);
+}
+
