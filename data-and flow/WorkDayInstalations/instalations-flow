@@ -3,29 +3,48 @@
 // ============================================================
 
 const CONFIG = {
-  WORKSPACE_SPREADSHEET_ID: '1WtsBT8mSthgj0jMZKp_AjZPtFobQ5hfT9fUCTiZWo4E',
-  WORKSPACE_SHEET_NAME: 'Installations monitoring',
+  // Main workspace spreadsheet where daily work is managed d/<<THIS PART>>/edit
+  WORKSPACE_SPREADSHEET_ID: '<<THIS PART>>',
+
+  // Active worksheet/tab name inside the workspace spreadsheet
+  WORKSPACE_SHEET_NAME: 'IYOUR SPREADSHEET NAME',
+
+  // Audit log worksheet/tab name inside the workspace spreadsheet
   AUDIT_SHEET_NAME: 'Audit Log',
 
-  ROOT_FOLDER_ID: '1OciExHi4OdiLypAWUl10FKfGU-U9ix8q',
-  ERROR_EMAIL: 'mediasales1988@gmail.com',
+  // Root Google Drive folder where year/month archive folders are stored https://drive.google.com/drive/folders/<<THIS PART>>
+  ROOT_FOLDER_ID: '<<THIS PART>>',
 
+// Email recipients used for critical errors
+ERROR_EMAILS: [
+  'director@company.com',
+  'developer@company.com'
+],
+
+  // Number of fresh template rows to create after each daily archive
   READY_ROWS_COUNT: 10,
+
+  // Script timezone. Apps Script project timezone must match this value
   TIMEZONE: 'Asia/Jerusalem',
 
+  // Default placeholder values used in new workspace rows
   STATUS_PLACEHOLDER: 'סטאטוס',
   TIME_PLACEHOLDER: 'זמן',
   NAME_PLACEHOLDER: 'שם',
 
-  COL_DATE: 0,
-  COL_DAY: 1,
-  COL_ID: 2,
-  COL_STATUS: 3,
-  COL_TIME: 4,
-  COL_NAME: 5,
-  COL_MID: 6,
+  // Zero-based column indexes used by the script
+  COL_DATE: 0,    // Column A — installation date
+  COL_DAY: 1,     // Column B — Hebrew day name
+  COL_ID: 2,      // Column C — customer/order ID
+  COL_STATUS: 3,  // Column D — installation status
+  COL_TIME: 4,    // Column E — installation time slot
+  COL_NAME: 5,    // Column F — manager/agent name
+  COL_MID: 6,     // Column G — MID/reference field
 
-  HEBREW_DAYS: ['ראשון','שני','שלישי','רביעי','חמישי','שישי','שבת'],
+  // Hebrew day names by JavaScript day index: Sunday = 0, Saturday = 6
+  HEBREW_DAYS: ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'],
+
+  // Final valid statuses used for archived records
   VALID_STATUSES: ['תואם', 'לא תואם', 'בוטל']
 };
 
