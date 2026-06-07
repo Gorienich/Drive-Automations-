@@ -1,164 +1,307 @@
 # 🚀 Installations Automation System (Google Apps Script)
 
-A fully automated Google Apps Script system for managing installation/workspace data, archiving, reporting, and Drive structure generation.
+A lightweight Google Apps Script automation for managing installation records, monthly archiving, workspace reset, and Google Drive structure management.
 
-Designed for real-world operations: stable, predictable, and fully hands-off after setup.
-
----
-
-## 🧠 System Overview
-
-This automation handles:
-
-- 📦 Daily data archiving
-- 🧹 Workspace cleanup & reset
-- 📁 Monthly + yearly Google Drive structure
-- 📊 Weekly & monthly reports via email
-- ⚙️ Fully automated trigger-based execution
-
-Everything runs inside Google Apps Script with Google Sheets + Drive integration.
+Designed for reliability, low maintenance, and long-term operation.
 
 ---
 
-## ⏱️ Automation Schedule
+# 🧠 What This Automation Does
 
-### 🌙 Daily (21:00 Israel Time)
-- Archive completed/past rows into monthly sheets
-- Reset workspace (keep 10 ready template rows)
-- Ensure current & next month sheets exist
+Every day at 21:00 (Israel time), the system automatically:
 
-### 📊 Weekly (Friday 21:00)
-- Sends weekly report via email
+* Archives completed installation rows
+* Moves records into monthly archive sheets
+* Organizes data into year/month Drive structure
+* Resets the workspace
+* Creates 10 fresh working rows
+* Verifies monthly archive files exist
+* Logs all activity
+* Sends email alerts only when errors occur
 
-### 📅 Monthly (1st day of month)
-- Sends previous month report
+No daily, weekly, or monthly reports are generated.
 
-### 🗂️ Yearly (December 31)
-- Creates next year folder
-- Pre-generates 12 monthly spreadsheets
+Reporting is handled separately through Looker Studio.
 
 ---
 
-## 📂 Data Structure
+# ⚙️ Automation Flow
 
-### Workspace Sheet
-Active working sheet where daily operations happen.
+## Daily Run (21:00)
+
+1. Validate configuration
+2. Lock execution (prevent duplicate runs)
+3. Archive valid rows from workspace
+4. Route rows to correct monthly archive file
+5. Normalize statuses
+6. Delete archived rows
+7. Rebuild workspace with fresh template rows
+8. Verify current and next month archive files exist
+9. Write audit log
+10. Send email only if an error occurs
+
+---
+
+# 📂 Google Drive Structure
+
+Archive files are automatically organized by year and month.
+
+Example:
+
+```text
+installations/
+└── 2026/
+    ├── 2026_01
+    ├── 2026_02
+    ├── 2026_03
+    ├── ...
+    └── 2026_12
+```
+
+Each monthly file contains a sheet:
+
+```text
+2026_06
+└── 062026
+```
+
+---
+
+# 📋 Workspace Structure
+
+Active working sheet:
+
+```text
+Installations monitoring
+```
 
 Columns:
 
-A: Date
-B: Day
-C: ID
-D: Status
-E: Time
-F: Name
-G: MID
-
-
----
-
-### Google Drive Structure
-
-
-ROOT_FOLDER/
-└── 2026/
-├── 01_2026
-├── 02_2026
-├── .....
-└── 12_2026
-
-
-Each monthly file contains archived records.
+| Column | Description |
+| ------ | ----------- |
+| A      | Date        |
+| B      | Day         |
+| C      | ID          |
+| D      | Status      |
+| E      | Time        |
+| F      | Name        |
+| G      | MID         |
 
 ---
 
-## ⚙️ Setup Instructions
+# 📦 Archive Structure
 
-### 1. Open Apps Script
-Go to:
+Monthly archive sheets contain:
 
-Google Sheets → Extensions → Apps Script
+| Column | Description       |
+| ------ | ----------------- |
+| A      | Installation Date |
+| B      | Day               |
+| C      | ID                |
+| D      | Status            |
+| E      | Time              |
+| F      | Name              |
+| G      | MID               |
+| H      | Archived At       |
 
+---
 
-### 2. Paste Script
-Paste the full automation script into the editor.
+# 🧹 Workspace Reset
 
-### 3. Configure System
-Fill in:
+After archiving:
 
-```js
-CONFIG.WORKSPACE_SPREADSHEET_ID
-CONFIG.ROOT_FOLDER_ID
-CONFIG.REPORT_EMAIL
-4. Set Timezone
+* The workspace is cleared
+* 10 new rows are generated
+* Dropdowns and validations are preserved
+* All rows receive the next working day
+* Saturday is automatically skipped
 
-Make sure your Google Sheet timezone is:
+---
 
-Asia/Jerusalem (UTC+3)
-5. Create Triggers
+# 🔒 Reliability Features
 
-Run once:
+## LockService
 
-setupTriggers()
-🔧 Manual Testing Tools
+Prevents concurrent executions.
 
-You can safely test the system anytime:
+Only one archive process can run at a time.
 
-manualRunNow()                    // Full pipeline test
-manualArchiveOnly()              // Only archive logic
-manualSendWeeklyReport()         // Weekly email test
-manualSendMonthlyReport()        // Monthly email test
-manualCreateAllMonthsForYear()   // Pre-build yearly structure
-🧩 Key Features
-✔ Safe Execution
-Try/catch error handling
-No silent failures
-Full logging system
-✔ Smart Archiving
-Automatically groups data by month
-Removes processed rows safely (bottom-up delete logic)
-✔ Workspace Optimization
-Always keeps 10 ready template rows
-Auto-prepares next working day entries
-✔ Reporting System
-Weekly + monthly aggregated stats
-Email HTML report with styled dashboard
-✔ Drive Auto Structure
-Year folders auto-created
-Monthly spreadsheets generated on demand
-📊 Reporting Includes
-Total installations
-Breakdown by:
-Status
-Manager
-Day of week
-Clean HTML dashboard email (RTL support included)
-🚀 Design Philosophy
+---
 
-This system is built on:
+## Validation
 
-Stability over complexity
-Predictable automation flow
-Minimal manual intervention
-Google-native tools only (Sheets + Drive + Apps Script)
-🧪 Recommended Usage
-Run manualRunNow() before first production activation
-Verify Drive structure creation
-Confirm email delivery
-Then activate triggers
-⚠️ Notes
-Make sure Spreadsheet timezone is correct
-Do not rename column structure without updating CONFIG
-Do not delete _SYSTEM_LOGS sheet if added later
-📌 Future Improvements (optional ideas)
-Slack / Telegram notifications
-Dashboard UI (Looker Studio)
-Multi-workspace support
-Role-based access control
-⭐ Support
+Before execution:
 
-If this project helped you build a stable automation system, consider giving it a ⭐ on GitHub.
+* Workspace spreadsheet is verified
+* Workspace sheet is verified
+* Root Drive folder is verified
+* Timezone is verified
 
-It helps a lot and keeps improvements coming.
+---
 
+## Audit Log
 
+Every run is written to:
+
+```text
+Audit Log
+```
+
+Including:
+
+* Run ID
+* Date
+* Time
+* Status
+* Archived rows count
+* Errors
+
+---
+
+## Error Notifications
+
+Emails are sent ONLY when:
+
+* Archive fails
+* Monthly sheet creation fails
+* Year folder creation fails
+* Configuration validation fails
+* Any unhandled exception occurs
+
+No routine success emails are sent.
+
+---
+
+# 🛠 Manual Functions
+
+Validate configuration:
+
+```javascript
+manualValidateConfig()
+```
+
+Create trigger:
+
+```javascript
+manualSetupTriggers()
+```
+
+Run full automation:
+
+```javascript
+manualRunNow()
+```
+
+Archive only:
+
+```javascript
+manualArchiveOnly()
+```
+
+Create all months for current year:
+
+```javascript
+manualCreateAllMonthsForCurrentYear()
+```
+
+Create all months for next year:
+
+```javascript
+manualCreateAllMonthsForNextYear()
+```
+
+---
+
+# ⚙️ Initial Setup
+
+## 1. Open Apps Script
+
+```text
+Google Sheets
+→ Extensions
+→ Apps Script
+```
+
+---
+
+## 2. Paste Script
+
+Replace the default code with the automation script.
+
+---
+
+## 3. Configure IDs
+
+Update:
+
+```javascript
+WORKSPACE_SPREADSHEET_ID
+ROOT_FOLDER_ID
+ERROR_EMAIL
+```
+
+---
+
+## 4. Set Project Timezone
+
+```text
+Asia/Jerusalem
+```
+
+---
+
+## 5. Validate
+
+Run:
+
+```javascript
+manualValidateConfig()
+```
+
+---
+
+## 6. Create Trigger
+
+Run:
+
+```javascript
+manualSetupTriggers()
+```
+
+---
+
+# 📅 Year-End Behavior
+
+On December 31:
+
+* Next year's folder is created
+* All 12 monthly archive files are generated automatically
+
+Example:
+
+```text
+2027/
+├── 2027_01
+├── 2027_02
+├── ...
+└── 2027_12
+```
+
+---
+
+# 🎯 Design Goals
+
+* Stability first
+* Minimal maintenance
+* Google-native stack only
+* Predictable execution
+* Error visibility
+* Simple recovery process
+
+---
+
+# 📄 License
+
+Internal operational automation.
+
+Use at your own risk and always test in a non-production copy before deployment.
