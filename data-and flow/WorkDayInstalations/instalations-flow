@@ -1,815 +1,615 @@
 // ============================================================
-// INSTALLATIONS AUTOMATION — Google Apps Script
-// Version: 2.0 — Production Hardened
-// ============================================================
-//
-// WHAT THIS SCRIPT DOES:
-//   ✅ Every day at 21:00 (Israel time):
-//      - Archives today's/past completed rows → correct monthly sheet
-//      - Clears workspace, adds fresh template rows spread across next workdays
-//      - Creates current + next month sheet if missing
-//      - Writes every run result to Audit Log sheet
-//   ✅ Every Friday 21:00  → weekly stats report by email
-//   ✅ Every 1st of month  → full previous-month report
-//   ✅ Every 15th of month → current month-to-date summary
-//   ✅ December 31st       → pre-creates all 12 monthly sheets for next year
-//   ✅ Any error           → immediate alert email + audit log entry
-//   ✅ LockService         → prevents concurrent runs from corrupting workspace
-//
-// HOW TO USE:
-//   1. Open Workspace Google Sheet → Extensions → Apps Script
-//   2. ⚠️  Set Project Timezone: Project Settings → Time zone → Asia/Jerusalem
-//   3. Paste this entire file
-//   4. Fill in CONFIG below
-//   5. Run  validateConfig()   — verify all IDs are reachable
-//   6. Run  setupTriggers()    ONCE
-//   Done — fully automatic from here.
+// INSTALLATIONS AUTOMATION — SIMPLE PRODUCTION VERSION
 // ============================================================
 
-
-// ============================================================
-// ⚙️  CONFIGURATION
-// ============================================================
 const CONFIG = {
-
-  // Google Sheet ID of "Installations work space"
-  // URL: docs.google.com/spreadsheets/d/ <<THIS PART>> /edit
-  WORKSPACE_SPREADSHEET_ID: '<<THIS PART>>',
-
-  // Exact tab name inside the workspace spreadsheet  or your name you wish
-  WORKSPACE_SHEET_NAME: 'Installations monitoring',   
-
-  // Tab name for execution audit log (auto-created if missing)
+  WORKSPACE_SPREADSHEET_ID: '1WtsBT8mSthgj0jMZKp_AjZPtFobQ5hfT9fUCTiZWo4E',
+  WORKSPACE_SHEET_NAME: 'Installations monitoring',
   AUDIT_SHEET_NAME: 'Audit Log',
 
-  // Root Drive folder ID for "installations" archive
-  // URL: drive.google.com/drive/folders/ <<THIS PART>>
-  ROOT_FOLDER_ID: '<<THIS PART>>',
+  ROOT_FOLDER_ID: '1OciExHi4OdiLypAWUl10FKfGU-U9ix8q',
+  ERROR_EMAIL: 'mediasales1988@gmail.com',
 
-  // All reports and error alerts go here
-  REPORT_EMAIL: 'example@gmail.com',
-
-  // How many ready template rows to maintain after daily reset
   READY_ROWS_COUNT: 10,
-
-  // Must match Apps Script Project Settings → Time zone
   TIMEZONE: 'Asia/Jerusalem',
 
-  // ---- Placeholder values (must match exactly what's in the sheet) ----
-  STATUS_PLACEHOLDER: 'בחר סטאטוס',
-  TIME_PLACEHOLDER:   'בחר זמן',
-  NAME_PLACEHOLDER:   'בחר שם',
+  STATUS_PLACEHOLDER: 'סטאטוס',
+  TIME_PLACEHOLDER: 'זמן',
+  NAME_PLACEHOLDER: 'שם',
 
-  // ---- Column indices (0 = A, 1 = B, ...) ----
-  COL_DATE:   0,  // A  תאריך
-  COL_DAY:    1,  // B  יום
-  COL_ID:     2,  // C  ID
-  COL_STATUS: 3,  // D  סטאטוס
-  COL_TIME:   4,  // E  זמן
-  COL_NAME:   5,  // F  שם
-  COL_MID:    6,  // G  MID
+  COL_DATE: 0,
+  COL_DAY: 1,
+  COL_ID: 2,
+  COL_STATUS: 3,
+  COL_TIME: 4,
+  COL_NAME: 5,
+  COL_MID: 6,
 
-  // Sunday = index 0
   HEBREW_DAYS: ['ראשון','שני','שלישי','רביעי','חמישי','שישי','שבת'],
-
-  HEBREW_MONTHS: [
-    'ינואר','פברואר','מרץ','אפריל','מאי','יוני',
-    'יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר',
-  ],
+  VALID_STATUSES: ['תואם', 'לא תואם', 'בוטל']
 };
-// ============================================================
 
 
 // ============================================================
-// 🔧 SETUP — Run validateConfig() then setupTriggers() ONCE
+// SETUP
 // ============================================================
 
 function validateConfig() {
   const errors = [];
 
   try {
+    const file = DriveApp.getFileById(CONFIG.WORKSPACE_SPREADSHEET_ID);
+    if (file.getMimeType() !== MimeType.GOOGLE_SHEETS) {
+      errors.push('Workspace file is not native Google Sheets');
+    }
+
     const ss = SpreadsheetApp.openById(CONFIG.WORKSPACE_SPREADSHEET_ID);
     if (!ss.getSheetByName(CONFIG.WORKSPACE_SHEET_NAME)) {
-      errors.push(`Sheet tab "${CONFIG.WORKSPACE_SHEET_NAME}" not found in workspace spreadsheet`);
+      errors.push(`Workspace tab not found: ${CONFIG.WORKSPACE_SHEET_NAME}`);
     }
   } catch (e) {
-    errors.push(`Cannot open workspace spreadsheet: ${e.message}`);
+    errors.push(`Cannot open workspace: ${e.message}`);
   }
 
   try {
     DriveApp.getFolderById(CONFIG.ROOT_FOLDER_ID);
   } catch (e) {
-    errors.push(`Cannot access root Drive folder: ${e.message}`);
+    errors.push(`Cannot access root folder: ${e.message}`);
   }
 
-  if (!CONFIG.REPORT_EMAIL || !CONFIG.REPORT_EMAIL.includes('@')) {
-    errors.push('REPORT_EMAIL is invalid');
+  if (Session.getScriptTimeZone() !== CONFIG.TIMEZONE) {
+    errors.push(`Project timezone must be ${CONFIG.TIMEZONE}`);
   }
 
   if (errors.length > 0) {
-    errors.forEach(e => Logger.log('❌ ' + e));
-    throw new Error('Config validation failed:\n' + errors.join('\n'));
+    throw new Error(errors.join('\n'));
   }
 
-  Logger.log('✅ Config validation passed — all IDs and settings are valid.');
-  Logger.log(`⚠️  Make sure Project Settings → Time zone is set to: ${CONFIG.TIMEZONE}`);
+  Logger.log('✅ Config valid');
 }
+
 
 function setupTriggers() {
   validateConfig();
 
-  // Remove all existing triggers (prevents duplicates on re-run)
   ScriptApp.getProjectTriggers().forEach(t => ScriptApp.deleteTrigger(t));
 
-  // Single daily trigger at 21:00 — handles all report routing internally
   ScriptApp.newTrigger('dailyEndOfDay')
     .timeBased()
     .atHour(21)
     .everyDays(1)
     .create();
 
-  Logger.log('✅ Trigger created: dailyEndOfDay runs every day at 21:00.');
-  Logger.log('⚠️  Verify Project Settings → Time zone = Asia/Jerusalem');
+  Logger.log('✅ Daily trigger created for 21:00');
 }
 
 
 // ============================================================
-// 🌙 MAIN DAILY FUNCTION — auto-runs at 21:00
+// MAIN DAILY FLOW
 // ============================================================
+
 function dailyEndOfDay() {
-  // Prevent concurrent execution (e.g. manual + auto trigger overlap)
   const lock = LockService.getScriptLock();
+  const now = new Date();
+  const runId = Utilities.getUuid().slice(0, 8).toUpperCase();
+  const audit = [];
+  let tempSheet = null;
+
   try {
     lock.waitLock(30000);
-  } catch (e) {
-    Logger.log('⚠️ Lock not acquired — another instance is running. Aborting.');
-    return;
-  }
 
-  const now    = new Date();
-  const runId  = Utilities.getUuid().substring(0, 8).toUpperCase();
-  const audit  = [];
+    validateConfig();
 
-  Logger.log(`\n========== dailyEndOfDay [${runId}] started: ${formatDateTime(now)} ==========`);
+    const ss = SpreadsheetApp.openById(CONFIG.WORKSPACE_SPREADSHEET_ID);
+    const ws = ss.getSheetByName(CONFIG.WORKSPACE_SHEET_NAME);
 
-  try {
-    // ── STEP 1: Archive past/today rows ─────────────────────
-    const archivedCount = archivePastRows(audit);
-    Logger.log(`✅ Step 1: Archived ${archivedCount} rows`);
-    audit.push(['Step 1 — Archive rows', 'OK', `${archivedCount} rows archived`]);
+    tempSheet = backupTemplateRow(ss, ws);
 
-    // ── STEP 2: Reset workspace ──────────────────────────────
-    const { kept, added } = resetWorkspaceTo10Rows();
-    Logger.log(`✅ Step 2: Workspace reset (kept ${kept} future, added ${added} templates)`);
-    audit.push(['Step 2 — Reset workspace', 'OK', `kept ${kept}, added ${added} template rows`]);
+    const archiveResult = archiveWorkspaceRows(now, audit);
 
-    // ── STEP 3: Ensure current + next month files exist ──────
-    ensureMonthlyFilesExist(now);
-    Logger.log('✅ Step 3: Monthly files verified');
-    audit.push(['Step 3 — Ensure monthly files', 'OK', '']);
+    resetWorkspaceFromTemplate(ws, tempSheet, now);
 
-    // ── STEP 4: Friday → weekly report ──────────────────────
-    if (now.getDay() === 5) {
-      sendWeeklyReport(now);
-      Logger.log('✅ Step 4: Weekly report sent');
-      audit.push(['Step 4 — Weekly report', 'SENT', '']);
-    }
+    audit.push({
+      step: 'Reset Workspace',
+      status: 'OK',
+      details: `Created ${CONFIG.READY_ROWS_COUNT} fresh rows`
+    });
 
-    // ── STEP 5: 1st of month → previous month full report ───
-    if (now.getDate() === 1) {
-      const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-      sendMonthlyReport(lastMonth);
-      Logger.log('✅ Step 5: Monthly report sent');
-      audit.push(['Step 5 — Monthly report', 'SENT',
-        `${CONFIG.HEBREW_MONTHS[lastMonth.getMonth()]} ${lastMonth.getFullYear()}`]);
-    }
+    ensureMonthlyFilesExist(now, audit);
 
-    // ── STEP 6: 15th of month → mid-month summary ───────────
-    if (now.getDate() === 15) {
-      sendSummaryReport(now);
-      Logger.log('✅ Step 6: Mid-month summary sent');
-      audit.push(['Step 6 — Mid-month summary', 'SENT', '']);
-    }
-
-    // ── STEP 7: Dec 31 → pre-create next year folder ────────
     if (now.getMonth() === 11 && now.getDate() === 31) {
-      prepareNextYearFolder(now.getFullYear() + 1);
-      Logger.log(`✅ Step 7: Next year folder created (${now.getFullYear() + 1})`);
-      audit.push(['Step 7 — Next year folder', 'OK', String(now.getFullYear() + 1)]);
+      prepareYear(now.getFullYear() + 1, audit);
     }
 
-    Logger.log(`========== dailyEndOfDay [${runId}] completed successfully ==========\n`);
     writeAuditLog(now, runId, 'SUCCESS', audit);
 
   } catch (err) {
-    const errMsg = `שגיאה קריטית [${runId}] — ${formatDateTime(now)}\n\n${err.message}\n\nStack:\n${err.stack}`;
-    Logger.log('❌ CRITICAL ERROR: ' + errMsg);
-    audit.push(['CRITICAL ERROR', 'ERROR', err.message]);
-    writeAuditLog(now, runId, 'ERROR', audit, err.message);
-    sendErrorAlert(`⚠️ שגיאה קריטית — ניהול התקנות [${runId}]`, errMsg);
-
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-
-// ============================================================
-// 📦 ARCHIVE: Move past/today rows → monthly sheets
-// ============================================================
-function archivePastRows(audit) {
-  const ss   = SpreadsheetApp.openById(CONFIG.WORKSPACE_SPREADSHEET_ID);
-  const ws   = ss.getSheetByName(CONFIG.WORKSPACE_SHEET_NAME);
-  const data = ws.getDataRange().getValues();
-
-  const today      = getTodayIsrael();
-  const byMonth    = {};    // "YYYY_M" → [rows]
-  const rowsToDelete = [];  // sheet row numbers (1-indexed)
-  const rowErrors  = [];
-
-  for (let i = 1; i < data.length; i++) {
-    const row     = data[i];
-    const dateVal = row[CONFIG.COL_DATE];
-    if (!dateVal || isTemplateRow(row)) continue;
-
-    try {
-      const rowDate = parseDateIsrael(dateVal);
-      if (!rowDate) continue;
-
-      if (rowDate <= today) {
-        const key = `${rowDate.getFullYear()}_${rowDate.getMonth() + 1}`;
-        if (!byMonth[key]) byMonth[key] = [];
-        byMonth[key].push({ row, sheetRowNum: i + 1 });
-      }
-    } catch (e) {
-      rowErrors.push(`שורה ${i + 1}: ${e.message}`);
-      Logger.log(`  ⚠️ Skipping row ${i + 1}: ${e.message}`);
-    }
-  }
-
-  // Report row-level parsing errors (non-fatal)
-  if (rowErrors.length > 0) {
-    const msg = `שגיאות פענוח שורות (לא קריטי):\n${rowErrors.join('\n')}`;
-    Logger.log('  ⚠️ Row parse errors: ' + rowErrors.join(' | '));
-    if (audit) audit.push(['Archive — row parse errors', 'WARN', rowErrors.join('; ')]);
-    sendErrorAlert('⚠️ שגיאות פענוח שורות — ניהול התקנות', msg);
-  }
-
-  let totalArchived = 0;
-
-  for (const key of Object.keys(byMonth)) {
-    const [year, month] = key.split('_').map(Number);
-    const batch         = byMonth[key];
-
-    try {
-      const archived = appendRowsToMonthlySheet(year, month, batch.map(b => b.row));
-      totalArchived += archived;
-      // Only queue for deletion if archive succeeded
-      batch.forEach(b => rowsToDelete.push(b.sheetRowNum));
-    } catch (e) {
-      const errMsg = `ארכוב ${month}/${year} נכשל: ${e.message}`;
-      Logger.log('  ❌ ' + errMsg);
-      if (audit) audit.push([`Archive ${month}/${year}`, 'ERROR', e.message]);
-      // Rows stay in workspace — will retry on next daily run
-      sendErrorAlert(`⚠️ שגיאת ארכוב ${month}/${year} — ניהול התקנות`, errMsg);
-    }
-  }
-
-  // Delete from workspace BOTTOM-UP (keeps row numbers valid)
-  rowsToDelete.sort((a, b) => b - a).forEach(rowNum => ws.deleteRow(rowNum));
-
-  return totalArchived;
-}
-
-function isTemplateRow(row) {
-  const date   = row[CONFIG.COL_DATE];
-  const status = row[CONFIG.COL_STATUS];
-  return !date || !status || status === CONFIG.STATUS_PLACEHOLDER;
-}
-
-
-// ============================================================
-// 📋 MONTHLY SHEET: Append rows with duplicate protection
-// ============================================================
-function appendRowsToMonthlySheet(year, month, rows) {
-  const sheet = getOrCreateMonthlySheet(year, month);
-
-  // Build fingerprint set from existing data to detect duplicates
-  const existingData = sheet.getDataRange().getValues();
-  const existingSigs = new Set(existingData.slice(1).map(rowSignature));
-
-  let appended = 0;
-  rows.forEach(row => {
-    const sig = rowSignature(row);
-    if (existingSigs.has(sig)) {
-      Logger.log(`  ⚠️ Duplicate skipped: ${sig}`);
-      return;
-    }
-    // FIX: v1 dropped COL_MID — now included
-    sheet.appendRow([
-      row[CONFIG.COL_DATE],
-      row[CONFIG.COL_DAY],
-      row[CONFIG.COL_ID],
-      row[CONFIG.COL_STATUS],
-      row[CONFIG.COL_TIME],
-      row[CONFIG.COL_NAME],
-      row[CONFIG.COL_MID],
-    ]);
-    existingSigs.add(sig);
-    appended++;
-  });
-
-  Logger.log(`  → ${month}/${year}: ${appended} appended, ${rows.length - appended} duplicates skipped`);
-  return appended;
-}
-
-/** Row fingerprint: date + ID + status + name — detects re-archive of same row */
-function rowSignature(row) {
-  const d    = row[CONFIG.COL_DATE];
-  const id   = String(row[CONFIG.COL_ID]     || '').trim();
-  const stat = String(row[CONFIG.COL_STATUS] || '').trim();
-  const name = String(row[CONFIG.COL_NAME]   || '').trim();
-  const dateStr = d ? formatDate(d instanceof Date ? d : new Date(d)) : '';
-  return `${dateStr}|${id}|${stat}|${name}`;
-}
-
-function getOrCreateMonthlySheet(year, month) {
-  const monthStr  = String(month).padStart(2, '0');
-  const fileName  = `${monthStr}_${year}`;
-  const sheetName = `${monthStr}${year}`;
-
-  const yearFolder    = getOrCreateYearFolder(year);
-  const existingFiles = yearFolder.getFilesByName(fileName);
-
-  let ss;
-  if (existingFiles.hasNext()) {
-    ss = SpreadsheetApp.open(existingFiles.next());
-  } else {
-    ss = SpreadsheetApp.create(fileName);
-    DriveApp.getFileById(ss.getId()).moveTo(yearFolder);
-
-    const sheet = ss.getActiveSheet();
-    sheet.setName(sheetName);
-    sheet.setRightToLeft(true);
-    // FIX: v1 header had 6 columns — MID now included
-    sheet.appendRow(['תאריך','יום','ID','סטאטוס','זמן','שם','MID']);
-    sheet.setFrozenRows(1);
-    sheet.getRange('A:A').setNumberFormat('dd/mm/yyyy');
-    sheet.getRange(1, 1, 1, 7).setFontWeight('bold').setBackground('#e8f0fe');
-    sheet.autoResizeColumns(1, 7);
-
-    Logger.log(`  → Created monthly sheet: ${fileName}`);
-    Utilities.sleep(300); // brief pause — avoids Drive quota burst on bulk creation
-  }
-
-  return ss.getSheetByName(sheetName) || ss.getSheets()[0];
-}
-
-function getOrCreateYearFolder(year) {
-  const root    = DriveApp.getFolderById(CONFIG.ROOT_FOLDER_ID);
-  const folders = root.getFoldersByName(String(year));
-  if (folders.hasNext()) return folders.next();
-  const folder = root.createFolder(String(year));
-  Logger.log(`  → Created year folder: ${year}`);
-  return folder;
-}
-
-function ensureMonthlyFilesExist(date) {
-  const year  = date.getFullYear();
-  const month = date.getMonth() + 1;
-  getOrCreateMonthlySheet(year, month);
-  const nextMonth = month === 12 ? 1         : month + 1;
-  const nextYear  = month === 12 ? year + 1  : year;
-  getOrCreateMonthlySheet(nextYear, nextMonth);
-}
-
-
-// ============================================================
-// 🧹 WORKSPACE RESET: Remove old rows, add fresh template rows
-// ============================================================
-function resetWorkspaceTo10Rows() {
-  const ss   = SpreadsheetApp.openById(CONFIG.WORKSPACE_SPREADSHEET_ID);
-  const ws   = ss.getSheetByName(CONFIG.WORKSPACE_SHEET_NAME);
-  const data = ws.getDataRange().getValues();
-
-  const tomorrow     = getTodayIsrael();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-
-  let futureRowCount = 0;
-  const rowsToDelete = [];
-
-  for (let i = 1; i < data.length; i++) {
-    const row     = data[i];
-    const dateVal = row[CONFIG.COL_DATE];
-
-    if (!dateVal || isTemplateRow(row)) {
-      rowsToDelete.push(i + 1);
-      continue;
-    }
-
-    const rowDate = parseDateIsrael(dateVal);
-    if (!rowDate || rowDate < tomorrow) {
-      rowsToDelete.push(i + 1);
-    } else {
-      futureRowCount++;
-    }
-  }
-
-  rowsToDelete.sort((a, b) => b - a).forEach(rowNum => ws.deleteRow(rowNum));
-
-  // FIX: v1 stamped all template rows with the SAME next workday.
-  // v2 spreads them across the next N distinct workdays.
-  const rowsToAdd  = Math.max(0, CONFIG.READY_ROWS_COUNT - futureRowCount);
-  const newRows    = buildTemplateRows(rowsToAdd, new Date());
-  newRows.forEach(rowData => ws.appendRow(rowData));
-
-  Logger.log(`  → Kept ${futureRowCount} future rows, added ${rowsToAdd} template rows`);
-  return { kept: futureRowCount, added: rowsToAdd };
-}
-
-/**
- * Build template rows spread across the next `count` workdays.
- * (skips Saturday; Friday is kept as a workday for Israeli context)
- */
-function buildTemplateRows(count, fromDate) {
-  const rows   = [];
-  const cursor = new Date(fromDate);
-  cursor.setHours(0, 0, 0, 0);
-
-  for (let i = 0; i < count; i++) {
-    cursor.setDate(cursor.getDate() + 1);
-    while (cursor.getDay() === 6) cursor.setDate(cursor.getDate() + 1); // skip Shabbat
-
-    rows.push([
-      new Date(cursor),
-      CONFIG.HEBREW_DAYS[cursor.getDay()],
-      '',                          // ID — filled by user
-      CONFIG.STATUS_PLACEHOLDER,
-      CONFIG.TIME_PLACEHOLDER,
-      CONFIG.NAME_PLACEHOLDER,
-      '',                          // MID — filled by user
-    ]);
-  }
-  return rows;
-}
-
-
-// ============================================================
-// 📊 REPORTS
-// ============================================================
-
-/** Weekly: last 7 days (runs Friday) */
-function sendWeeklyReport(now) {
-  const endDate   = new Date(now);
-  const startDate = new Date(now);
-  startDate.setDate(now.getDate() - 6);
-
-  const stats   = collectStats(startDate, endDate);
-  const subject = `📊 דוח שבועי התקנות — ${formatDate(startDate)} עד ${formatDate(endDate)}`;
-  sendStatsEmail(subject, stats, 'שבועי', startDate, endDate);
-}
-
-/** Monthly: full previous month (runs 1st of month) */
-function sendMonthlyReport(monthDate) {
-  const year      = monthDate.getFullYear();
-  const month     = monthDate.getMonth();
-  const startDate = new Date(year, month, 1);
-  const endDate   = new Date(year, month + 1, 0); // last day of month
-
-  const stats   = collectStats(startDate, endDate);
-  const subject = `📊 דוח חודשי התקנות — ${CONFIG.HEBREW_MONTHS[month]} ${year}`;
-  sendStatsEmail(subject, stats, `${CONFIG.HEBREW_MONTHS[month]} ${year}`, startDate, endDate);
-}
-
-/** Summary: current month from 1st to today (runs 15th, or on demand) */
-function sendSummaryReport(now) {
-  const year      = now.getFullYear();
-  const month     = now.getMonth();
-  const startDate = new Date(year, month, 1);
-  const endDate   = new Date(now);
-
-  const stats   = collectStats(startDate, endDate);
-  const label   = `${CONFIG.HEBREW_MONTHS[month]} ${year} — סיכום עד היום`;
-  const subject = `📊 סיכום שוטף — ${CONFIG.HEBREW_MONTHS[month]} ${year} (עד ${formatDate(endDate)})`;
-  sendStatsEmail(subject, stats, label, startDate, endDate);
-}
-
-function collectStats(startDate, endDate) {
-  const stats = { total: 0, byStatus: {}, byManager: {}, byDay: {} };
-
-  // Workspace — rows not yet archived
-  const ss = SpreadsheetApp.openById(CONFIG.WORKSPACE_SPREADSHEET_ID);
-  const ws = ss.getSheetByName(CONFIG.WORKSPACE_SHEET_NAME);
-  processSheetForStats(ws, startDate, endDate, stats);
-
-  // Monthly archive files
-  const yearsNeeded = new Set();
-  const d = new Date(startDate);
-  while (d <= endDate) {
-    yearsNeeded.add(d.getFullYear());
-    d.setMonth(d.getMonth() + 1);
-  }
-
-  yearsNeeded.forEach(year => {
-    try {
-      const yearFolder = getOrCreateYearFolder(year);
-      const files      = yearFolder.getFiles();
-      while (files.hasNext()) {
-        const file = files.next();
-        // FIX: v1 crashed on non-Sheets files — guard by MIME type
-        if (file.getMimeType() !== MimeType.GOOGLE_SHEETS) continue;
-        try {
-          const monthSheet = SpreadsheetApp.open(file).getSheets()[0];
-          processSheetForStats(monthSheet, startDate, endDate, stats);
-        } catch (e) {
-          Logger.log(`  ⚠️ Skipping file "${file.getName()}": ${e.message}`);
-        }
-      }
-    } catch (e) {
-      Logger.log(`  ⚠️ Error reading year folder ${year}: ${e.message}`);
-    }
-  });
-
-  return stats;
-}
-
-function processSheetForStats(sheet, startDate, endDate, stats) {
-  const data  = sheet.getDataRange().getValues();
-  const start = dayStart(startDate);
-  const end   = dayEnd(endDate);
-
-  data.slice(1).forEach(row => {
-    const dateVal = row[CONFIG.COL_DATE];
-    const status  = row[CONFIG.COL_STATUS];
-    const manager = row[CONFIG.COL_NAME];
-
-    if (!dateVal || isTemplateRow(row)) return;
-
-    const rowDate = parseDateIsrael(dateVal);
-    if (!rowDate || rowDate < start || rowDate > end) return;
-
-    stats.total++;
-
-    const statusKey  = String(status  || 'לא ידוע').trim();
-    const managerKey = String(manager || 'לא ידוע').trim();
-    const dayName    = CONFIG.HEBREW_DAYS[rowDate.getDay()];
-
-    stats.byStatus[statusKey]   = (stats.byStatus[statusKey]   || 0) + 1;
-    stats.byManager[managerKey] = (stats.byManager[managerKey] || 0) + 1;
-    stats.byDay[dayName]        = (stats.byDay[dayName]        || 0) + 1;
-  });
-}
-
-function sendStatsEmail(subject, stats, periodLabel, startDate, endDate) {
-  const html = buildReportHtml(stats, periodLabel, startDate, endDate);
-  MailApp.sendEmail({ to: CONFIG.REPORT_EMAIL, subject, htmlBody: html });
-  Logger.log(`  → Report sent to ${CONFIG.REPORT_EMAIL}: ${subject}`);
-}
-
-/** Error alert — isolated try/catch so a Mail quota error doesn't swallow original error */
-function sendErrorAlert(subject, body) {
-  try {
-    MailApp.sendEmail(CONFIG.REPORT_EMAIL, subject, body);
-  } catch (mailErr) {
-    Logger.log(`❌ Could not send error alert email: ${mailErr.message}`);
-  }
-}
-
-
-// ============================================================
-// 📝 AUDIT LOG — Persistent execution history in spreadsheet
-// ============================================================
-function writeAuditLog(runDate, runId, status, steps, errorMessage) {
-  try {
-    const ss  = SpreadsheetApp.openById(CONFIG.WORKSPACE_SPREADSHEET_ID);
-    let   log = ss.getSheetByName(CONFIG.AUDIT_SHEET_NAME);
-
-    if (!log) {
-      log = ss.insertSheet(CONFIG.AUDIT_SHEET_NAME);
-      log.appendRow(['תאריך','שעה','Run ID','סטטוס','שלב','פרטים']);
-      log.setFrozenRows(1);
-      log.setRightToLeft(true);
-      log.getRange(1, 1, 1, 6).setFontWeight('bold').setBackground('#e8f0fe');
-    }
-
-    const dateStr = formatDate(runDate);
-    const timeStr = Utilities.formatDate(runDate, CONFIG.TIMEZONE, 'HH:mm:ss');
-
-    // Summary row
-    log.appendRow([dateStr, timeStr, runId, status, 'SUMMARY',
-      errorMessage || `${steps.length} steps, ${steps.filter(s => s[1] === 'ERROR').length} errors`]);
-
-    // Individual step rows
-    steps.forEach(([step, stepStatus, detail]) => {
-      log.appendRow([dateStr, timeStr, runId, stepStatus, step, detail || '']);
+    audit.push({
+      step: 'CRITICAL ERROR',
+      status: 'ERROR',
+      details: err.message
     });
 
-    // Trim log to 5000 rows (remove oldest entries)
-    const maxRows    = 5000;
-    const totalRows  = log.getLastRow();
-    if (totalRows > maxRows + 1) {
-      log.deleteRows(2, totalRows - maxRows);
-    }
+    writeAuditLog(now, runId, 'ERROR', audit);
 
-  } catch (e) {
-    Logger.log(`⚠️ Could not write audit log: ${e.message}`);
+    sendErrorAlert(
+      `⚠️ שגיאה באוטומציית התקנות [${runId}]`,
+      buildErrorBody(now, runId, err, audit)
+    );
+
+    throw err;
+
+  } finally {
+    try {
+      if (tempSheet) tempSheet.getParent().deleteSheet(tempSheet);
+    } catch (e) {}
+
+    try {
+      lock.releaseLock();
+    } catch (e) {}
   }
 }
 
 
 // ============================================================
-// 📧 EMAIL TEMPLATE — RTL, Hebrew, styled HTML
+// ARCHIVE WORKSPACE ROWS
 // ============================================================
-function buildReportHtml(stats, periodLabel, startDate, endDate) {
-  const TD = 'padding:9px 12px;border:1px solid #e0e0e0;';
-  const TH = 'padding:10px 12px;border:1px solid #e0e0e0;background:#f1f3f4;text-align:right;';
 
-  function tableRows(obj, showPct) {
-    // FIX: v1 produced broken HTML for empty stat objects
-    if (!obj || Object.keys(obj).length === 0) {
-      return `<tr><td style="${TD}" colspan="${showPct ? 3 : 2}">אין נתונים בתקופה זו</td></tr>`;
-    }
-    return Object.entries(obj)
-      .sort((a, b) => b[1] - a[1])
-      .map(([key, count]) => {
-        const pct     = stats.total > 0 ? Math.round(count / stats.total * 100) : 0;
-        const pctCell = showPct ? `<td style="${TD};text-align:center">${pct}%</td>` : '';
-        return `<tr>
-          <td style="${TD}">${key}</td>
-          <td style="${TD};text-align:center">${count}</td>
-          ${pctCell}
-        </tr>`;
-      }).join('');
+function archiveWorkspaceRows(archiveTime, audit) {
+  const ss = SpreadsheetApp.openById(CONFIG.WORKSPACE_SPREADSHEET_ID);
+  const ws = ss.getSheetByName(CONFIG.WORKSPACE_SHEET_NAME);
+
+  const values = ws.getDataRange().getValues();
+  const display = ws.getDataRange().getDisplayValues();
+
+  const grouped = {};
+  const rowsToDelete = [];
+
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    const displayRow = display[i];
+
+    if (isEmptyRow(row)) continue;
+
+    const installDate = parseDate(displayRow[CONFIG.COL_DATE]);
+    if (!installDate) continue;
+
+    if (!hasRealData(row)) continue;
+
+    row[CONFIG.COL_DATE] = installDate;
+    normalizeRowStatus(row);
+
+    const key = `${installDate.getFullYear()}_${installDate.getMonth() + 1}`;
+
+    if (!grouped[key]) grouped[key] = [];
+
+    grouped[key].push({
+      row,
+      sheetRow: i + 1
+    });
   }
 
-  const generatedAt = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'dd/MM/yyyy HH:mm');
+  let total = 0;
 
-  return `
-<!DOCTYPE html>
-<html dir="rtl" lang="he">
-<head><meta charset="UTF-8"></head>
-<body style="font-family:Arial,sans-serif;background:#f5f5f5;margin:0;padding:20px;direction:rtl;">
-<div style="max-width:640px;margin:0 auto;background:white;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
+  Object.keys(grouped).forEach(key => {
+    const [year, month] = key.split('_').map(Number);
+    const batch = grouped[key];
 
-  <!-- Header -->
-  <div style="background:linear-gradient(135deg,#1a73e8,#0d47a1);color:white;padding:28px 24px;">
-    <h1 style="margin:0;font-size:22px;font-weight:700;">📊 דוח ${periodLabel} — ניהול התקנות</h1>
-    <p style="margin:6px 0 0;opacity:0.85;font-size:14px;">${formatDate(startDate)} – ${formatDate(endDate)}</p>
-  </div>
+    const inserted = appendRowsToMonthlySheet(
+      year,
+      month,
+      batch.map(x => x.row),
+      archiveTime
+    );
 
-  <!-- Total -->
-  <div style="padding:24px;text-align:center;border-bottom:1px solid #f0f0f0;">
-    <div style="display:inline-block;background:#e8f0fe;border-radius:12px;padding:16px 32px;">
-      <div style="font-size:52px;font-weight:800;color:#1a73e8;line-height:1;">${stats.total}</div>
-      <div style="color:#555;font-size:15px;margin-top:4px;">סה"כ התקנות בתקופה</div>
-    </div>
-  </div>
+    if (inserted !== batch.length) {
+      throw new Error(`Archive mismatch for ${year}_${month}: expected ${batch.length}, inserted ${inserted}`);
+    }
 
-  <div style="padding:20px 24px;">
+    total += inserted;
 
-    <!-- By Status -->
-    <h2 style="color:#1a73e8;font-size:16px;border-right:4px solid #1a73e8;padding-right:10px;margin:0 0 12px;">לפי סטאטוס</h2>
-    <table style="width:100%;border-collapse:collapse;margin-bottom:24px;font-size:14px;">
-      <tr>
-        <th style="${TH}">סטאטוס</th>
-        <th style="${TH};text-align:center">כמות</th>
-        <th style="${TH};text-align:center">אחוז</th>
-      </tr>
-      ${tableRows(stats.byStatus, true)}
-    </table>
+    batch.forEach(x => rowsToDelete.push(x.sheetRow));
 
-    <!-- By Manager -->
-    <h2 style="color:#1a73e8;font-size:16px;border-right:4px solid #1a73e8;padding-right:10px;margin:0 0 12px;">לפי מנהל</h2>
-    <table style="width:100%;border-collapse:collapse;margin-bottom:24px;font-size:14px;">
-      <tr>
-        <th style="${TH}">שם מנהל</th>
-        <th style="${TH};text-align:center">כמות</th>
-      </tr>
-      ${tableRows(stats.byManager, false)}
-    </table>
+    audit.push({
+      step: 'Archive Rows',
+      status: 'OK',
+      targetFile: `${year}_${String(month).padStart(2, '0')}`,
+      targetSheet: `${String(month).padStart(2, '0')}${year}`,
+      received: batch.length,
+      inserted: inserted
+    });
+  });
 
-    <!-- By Day -->
-    <h2 style="color:#1a73e8;font-size:16px;border-right:4px solid #1a73e8;padding-right:10px;margin:0 0 12px;">לפי יום</h2>
-    <table style="width:100%;border-collapse:collapse;margin-bottom:8px;font-size:14px;">
-      <tr>
-        <th style="${TH}">יום</th>
-        <th style="${TH};text-align:center">כמות</th>
-      </tr>
-      ${tableRows(stats.byDay, false)}
-    </table>
+  rowsToDelete
+    .sort((a, b) => b - a)
+    .forEach(rowNum => ws.deleteRow(rowNum));
 
-  </div>
+  audit.push({
+    step: 'Archive Summary',
+    status: 'OK',
+    details: `${total} rows archived`
+  });
 
-  <!-- Footer -->
-  <div style="background:#f8f9fa;padding:14px 24px;text-align:center;color:#999;font-size:12px;border-top:1px solid #eee;">
-    דוח זה נשלח אוטומטית · מערכת ניהול התקנות · ${generatedAt}
-  </div>
-</div>
-</body>
-</html>`;
+  return total;
 }
 
 
-// ============================================================
-// 📅 YEAR-END: Pre-create all 12 monthly sheets for next year
-// ============================================================
-function prepareNextYearFolder(year) {
-  for (let m = 1; m <= 12; m++) {
-    getOrCreateMonthlySheet(year, m);
-    Utilities.sleep(500);
-  }
-  Logger.log(`✅ All 12 monthly sheets created for ${year}`);
+function hasRealData(row) {
+  const id = clean(row[CONFIG.COL_ID]);
+  const status = clean(row[CONFIG.COL_STATUS]);
+  const time = clean(row[CONFIG.COL_TIME]);
+  const name = clean(row[CONFIG.COL_NAME]);
+  const mid = clean(row[CONFIG.COL_MID]);
 
-  MailApp.sendEmail(
-    CONFIG.REPORT_EMAIL,
-    `✅ תיקיית ${year} נוצרה אוטומטית — ניהול התקנות`,
-    `תיקיית שנת ${year} נוצרה בהצלחה עם 12 גיליונות חודשיים מוכנים.\n\nמערכת ניהול התקנות`
+  return (
+    id !== '' ||
+    mid !== '' ||
+    (status !== '' && status !== CONFIG.STATUS_PLACEHOLDER) ||
+    (time !== '' && time !== CONFIG.TIME_PLACEHOLDER) ||
+    (name !== '' && name !== CONFIG.NAME_PLACEHOLDER)
   );
 }
 
 
-// ============================================================
-// 🛠️  TIMEZONE-SAFE DATE UTILITIES
-// ============================================================
+function normalizeRowStatus(row) {
+  const status = clean(row[CONFIG.COL_STATUS]);
 
-/** Today at midnight in Israel timezone */
-function getTodayIsrael() {
-  const str = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
-  return new Date(str + 'T00:00:00');
+  if (status === 'רץ' || status === 'ממתין') {
+    row[CONFIG.COL_STATUS] = 'לא תואם';
+  }
 }
 
-/** Parse any date value, normalize to midnight, return null if invalid */
-function parseDateIsrael(dateVal) {
-  if (!dateVal) return null;
-  const d = dateVal instanceof Date ? dateVal : new Date(dateVal);
-  if (isNaN(d.getTime())) return null;
-  const str = Utilities.formatDate(d, CONFIG.TIMEZONE, 'yyyy-MM-dd');
-  return new Date(str + 'T00:00:00');
+
+// ============================================================
+// MONTHLY FILES
+// ============================================================
+
+function appendRowsToMonthlySheet(year, month, rows, archiveTime) {
+  if (!rows.length) return 0;
+
+  const sheet = getOrCreateMonthlySheet(year, month);
+  const archivedAt = archiveTime || new Date();
+
+  const output = rows.map(row => [
+    dayStart(row[CONFIG.COL_DATE]),
+    row[CONFIG.COL_DAY],
+    row[CONFIG.COL_ID],
+    row[CONFIG.COL_STATUS],
+    row[CONFIG.COL_TIME],
+    row[CONFIG.COL_NAME],
+    row[CONFIG.COL_MID],
+    archivedAt
+  ]);
+
+  const startRow = sheet.getLastRow() + 1;
+
+  sheet.getRange(startRow, 1, output.length, 8).setValues(output);
+  sheet.getRange(startRow, 1, output.length, 1).setNumberFormat('dd/mm/yyyy');
+  sheet.getRange(startRow, 8, output.length, 1).setNumberFormat('dd/mm/yyyy HH:mm:ss');
+
+  SpreadsheetApp.flush();
+
+  return output.length;
 }
+
+
+function getOrCreateMonthlySheet(year, month) {
+  const monthStr = String(month).padStart(2, '0');
+  const fileName = `${year}_${monthStr}`;
+  const sheetName = `${monthStr}${year}`;
+
+  const folder = getOrCreateYearFolder(year);
+  const files = folder.getFilesByName(fileName);
+
+  let ss;
+
+  if (files.hasNext()) {
+    ss = SpreadsheetApp.open(files.next());
+  } else {
+    ss = SpreadsheetApp.create(fileName);
+    DriveApp.getFileById(ss.getId()).moveTo(folder);
+  }
+
+  let sheet = ss.getSheetByName(sheetName);
+
+  if (!sheet) {
+    sheet = ss.getSheets()[0];
+    sheet.setName(sheetName);
+  }
+
+  upgradeMonthlySheet(sheet);
+
+  return sheet;
+}
+
+
+function upgradeMonthlySheet(sheet) {
+  const headers = ['תאריך','יום','ID','סטאטוס','זמן','שם','MID','ארכיון בתאריך'];
+
+  sheet.setRightToLeft(true);
+  sheet.getRange(1, 1, 1, 8).setValues([headers]);
+  sheet.setFrozenRows(1);
+
+  sheet.getRange('A:A').setNumberFormat('dd/mm/yyyy');
+  sheet.getRange('H:H').setNumberFormat('dd/mm/yyyy HH:mm:ss');
+
+  sheet.getRange(1, 1, 1, 8)
+    .setFontWeight('bold')
+    .setBackground('#e8f0fe');
+
+  sheet.autoResizeColumns(1, 8);
+}
+
+
+function getOrCreateYearFolder(year) {
+  const root = DriveApp.getFolderById(CONFIG.ROOT_FOLDER_ID);
+  const folders = root.getFoldersByName(String(year));
+
+  return folders.hasNext() ? folders.next() : root.createFolder(String(year));
+}
+
+
+function ensureMonthlyFilesExist(date, audit) {
+  const currentYear = date.getFullYear();
+  const currentMonth = date.getMonth() + 1;
+
+  getOrCreateMonthlySheet(currentYear, currentMonth);
+
+  const nextMonthDate = new Date(currentYear, currentMonth, 1);
+  getOrCreateMonthlySheet(nextMonthDate.getFullYear(), nextMonthDate.getMonth() + 1);
+
+  audit.push({
+    step: 'Ensure Monthly Files',
+    status: 'OK',
+    details: 'Current and next month files verified'
+  });
+}
+
+
+function prepareYear(year, audit) {
+  for (let m = 1; m <= 12; m++) {
+    getOrCreateMonthlySheet(year, m);
+  }
+
+  audit.push({
+    step: 'Prepare Year Folder',
+    status: 'OK',
+    details: `Year ${year} prepared`
+  });
+}
+
+
+// ============================================================
+// WORKSPACE RESET
+// ============================================================
+
+function backupTemplateRow(ss, ws) {
+  const old = ss.getSheetByName('_TempTemplateSheet_');
+  if (old) ss.deleteSheet(old);
+
+  const temp = ss.insertSheet('_TempTemplateSheet_');
+  temp.hideSheet();
+
+  ws.getRange(2, 1, 1, 7).copyTo(temp.getRange(1, 1, 1, 7));
+
+  return temp;
+}
+
+
+function resetWorkspaceFromTemplate(ws, tempSheet, baseDate) {
+  const nextDay = getNextWorkingDay(baseDate);
+  const hebrewDay = CONFIG.HEBREW_DAYS[nextDay.getDay()];
+
+  ws.insertRowsBefore(2, CONFIG.READY_ROWS_COUNT);
+
+  const source = tempSheet.getRange(1, 1, 1, 7);
+  const target = ws.getRange(2, 1, CONFIG.READY_ROWS_COUNT, 7);
+
+  source.copyTo(target);
+
+  const formulas = target.getFormulas();
+  const values = [];
+
+  for (let r = 0; r < CONFIG.READY_ROWS_COUNT; r++) {
+    const row = [];
+
+    for (let c = 0; c < 7; c++) {
+      if (formulas[r][c]) {
+        row.push(formulas[r][c]);
+      } else if (c === CONFIG.COL_DATE) {
+        row.push(nextDay);
+      } else if (c === CONFIG.COL_DAY) {
+        row.push(hebrewDay);
+      } else if (c === CONFIG.COL_ID || c === CONFIG.COL_MID) {
+        row.push('');
+      } else if (c === CONFIG.COL_STATUS) {
+        row.push(CONFIG.STATUS_PLACEHOLDER);
+      } else if (c === CONFIG.COL_TIME) {
+        row.push(CONFIG.TIME_PLACEHOLDER);
+      } else if (c === CONFIG.COL_NAME) {
+        row.push(CONFIG.NAME_PLACEHOLDER);
+      } else {
+        row.push('');
+      }
+    }
+
+    values.push(row);
+  }
+
+  target.setValues(values);
+  ws.getRange(2, 1, CONFIG.READY_ROWS_COUNT, 1).setNumberFormat('dd/mm/yyyy');
+}
+
+
+function getNextWorkingDay(date) {
+  const d = new Date(date.getTime());
+  d.setDate(d.getDate() + 1);
+  d.setHours(0, 0, 0, 0);
+
+  while (d.getDay() === 6) {
+    d.setDate(d.getDate() + 1);
+  }
+
+  return d;
+}
+
+
+// ============================================================
+// AUDIT + ERROR EMAIL
+// ============================================================
+
+function writeAuditLog(date, runId, status, steps) {
+  try {
+    const ss = SpreadsheetApp.openById(CONFIG.WORKSPACE_SPREADSHEET_ID);
+    let sheet = ss.getSheetByName(CONFIG.AUDIT_SHEET_NAME);
+
+    if (!sheet) {
+      sheet = ss.insertSheet(CONFIG.AUDIT_SHEET_NAME);
+      sheet.setRightToLeft(true);
+      sheet.appendRow([
+        'תאריך','שעה','Run ID','סטטוס','שלב',
+        'קובץ יעד','גיליון יעד','התקבלו','הוכנסו','פרטים'
+      ]);
+      sheet.setFrozenRows(1);
+    }
+
+    const d = date instanceof Date ? date : new Date();
+    const dateStr = formatDate(d);
+    const timeStr = Utilities.formatDate(d, CONFIG.TIMEZONE, 'HH:mm:ss');
+
+    steps.forEach(s => {
+      sheet.appendRow([
+        dateStr,
+        timeStr,
+        runId,
+        s.status || status,
+        s.step || '',
+        s.targetFile || '',
+        s.targetSheet || '',
+        s.received || '',
+        s.inserted || '',
+        s.details || ''
+      ]);
+    });
+
+  } catch (e) {
+    Logger.log('Audit failed: ' + e.message);
+  }
+}
+
+
+function sendErrorAlert(subject, body) {
+  try {
+    MailApp.sendEmail(CONFIG.ERROR_EMAIL, subject, body);
+  } catch (e) {
+    Logger.log('Could not send error email: ' + e.message);
+  }
+}
+
+
+function buildErrorBody(date, runId, err, audit) {
+  return [
+    `Run ID: ${runId}`,
+    `Date: ${formatDate(date)} ${Utilities.formatDate(date, CONFIG.TIMEZONE, 'HH:mm:ss')}`,
+    '',
+    `Error: ${err.message}`,
+    '',
+    'Stack:',
+    err.stack || '',
+    '',
+    'Audit:',
+    JSON.stringify(audit, null, 2)
+  ].join('\n');
+}
+
+
+// ============================================================
+// UTILS
+// ============================================================
+
+function parseDate(value) {
+  if (!value) return null;
+
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    return dayStart(value);
+  }
+
+  const text = String(value).trim();
+  if (!text) return null;
+
+  const datePart = text.split(/\s+/)[0];
+  const match = datePart.match(/^(\d{1,2})[\/\.\-](\d{1,2})[\/\.\-](\d{4})$/);
+
+  if (!match) return null;
+
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const year = Number(match[3]);
+
+  const d = new Date(year, month - 1, day);
+
+  if (d.getFullYear() !== year || d.getMonth() !== month - 1 || d.getDate() !== day) {
+    return null;
+  }
+
+  return dayStart(d);
+}
+
 
 function dayStart(date) {
-  const d = new Date(date);
+  const d = new Date(date.getTime());
   d.setHours(0, 0, 0, 0);
   return d;
 }
 
-function dayEnd(date) {
-  const d = new Date(date);
-  d.setHours(23, 59, 59, 999);
-  return d;
-}
 
 function formatDate(date) {
-  if (!date) return '';
-  const d = date instanceof Date ? date : new Date(date);
+  const d = date instanceof Date ? date : new Date();
+
   return [
     String(d.getDate()).padStart(2, '0'),
     String(d.getMonth() + 1).padStart(2, '0'),
-    d.getFullYear(),
+    d.getFullYear()
   ].join('/');
 }
 
-function formatDateTime(date) {
-  if (!date) return '';
-  return `${formatDate(date)} ${Utilities.formatDate(date, CONFIG.TIMEZONE, 'HH:mm:ss')}`;
+
+function clean(value) {
+  return String(value || '').trim();
+}
+
+
+function isEmptyRow(row) {
+  return row.every(cell => clean(cell) === '');
 }
 
 
 // ============================================================
-// ▶️  MANUAL TEST FUNCTIONS — run from Apps Script editor
+// MANUAL FUNCTIONS
 // ============================================================
 
-/** Verify all CONFIG IDs are reachable before first run */
-function manualValidateConfig()      { validateConfig(); }
+function manualValidateConfig() {
+  validateConfig();
+}
 
-/** Full daily flow, right now */
-function manualRunNow()              { dailyEndOfDay(); }
+function manualSetupTriggers() {
+  setupTriggers();
+}
 
-/** Archive only — no workspace reset */
+function manualRunNow() {
+  dailyEndOfDay();
+}
+
 function manualArchiveOnly() {
-  const count = archivePastRows([]);
-  Logger.log(`Archived ${count} rows`);
+  const audit = [];
+  const result = archiveWorkspaceRows(new Date(), audit);
+  Logger.log(`Archived ${result} rows`);
 }
 
-/** Weekly report for current week */
-function manualSendWeeklyReport()   { sendWeeklyReport(new Date()); }
-
-/** Monthly report for current month */
-function manualSendMonthlyReport()  { sendMonthlyReport(new Date()); }
-
-/** Current month-to-date summary (on demand) */
-function manualSendSummaryReport()  { sendSummaryReport(new Date()); }
-
-/** Pre-create all months for current year */
-function manualCreateAllMonthsForYear() {
-  prepareNextYearFolder(new Date().getFullYear());
+function manualCreateAllMonthsForCurrentYear() {
+  prepareYear(new Date().getFullYear(), []);
 }
 
-/** Print last 20 audit log entries to Logger */
-function manualPrintAuditLog() {
-  const ss  = SpreadsheetApp.openById(CONFIG.WORKSPACE_SPREADSHEET_ID);
-  const log = ss.getSheetByName(CONFIG.AUDIT_SHEET_NAME);
-  if (!log) { Logger.log('Audit Log sheet not found — run manualRunNow() first'); return; }
-  log.getDataRange().getValues().slice(1, 21)
-    .forEach(r => Logger.log(r.join(' | ')));
+function manualCreateAllMonthsForNextYear() {
+  prepareYear(new Date().getFullYear() + 1, []);
 }
